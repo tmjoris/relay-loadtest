@@ -56,6 +56,9 @@ def relay_config(dir, args):
                       "host": RELAY.split(":")[0], "port": int(RELAY.split(":")[1])},
             "logging": {"level": "warn"},
             "limits": {"max_concurrent_requests": 1000},
+            # Post outcomes to the upstream instead of folding them into
+            # periodic client reports, so drops show up within the run.
+            "outcomes": {"emit_outcomes": True},
         }, f)
     subprocess.run([args.relay_bin, "-c", dir, "credentials", "generate"],
                    check=True, capture_output=True)
@@ -86,6 +89,10 @@ def run(rate, args):
         wait(f"http://{RELAY}/api/relay/healthcheck/ready/")
         blast(200, 3, args)  # warm-up: fetches every project's config
         time.sleep(2)
+        # Baseline: Relay's CPU with no traffic at all.
+        idle0 = cpu_seconds(relay.pid)
+        time.sleep(args.idle)
+        idle_cores = (cpu_seconds(relay.pid) - idle0) / args.idle
 
         up0, cpu0, t0 = get(f"http://{UPSTREAM}/stats"), cpu_seconds(relay.pid), time.time()
         peak = [0.0]
@@ -113,6 +120,7 @@ def run(rate, args):
             "outcomes": {k: v for k, v in outcomes.items() if v},
             "upstream_mb": (up1["bytes_compressed"] - up0["bytes_compressed"]) / 1e6,
             "relay_cpu_cores": cpu_busy / busy_secs,
+            "relay_idle_cores": idle_cores,
             "relay_rss_mb": peak[0],
         }
     finally:
@@ -131,6 +139,7 @@ def main():
     p.add_argument("--rates", default="500,1000,2000,0")
     p.add_argument("--duration", type=int, default=20)
     p.add_argument("--drain", type=int, default=5)
+    p.add_argument("--idle", type=int, default=5, help="seconds to measure Relay's idle CPU")
     p.add_argument("--concurrency", type=int, default=64)
     p.add_argument("--projects", type=int, default=100)
     p.add_argument("--mix", default="errors=30,transactions=30,sessions=25,check_ins=5,logs=10")
@@ -142,7 +151,7 @@ def main():
     print(f"{os.cpu_count()} CPUs; relay pinned to {args.relay_cpus or 'all'}; "
           f"{args.projects} projects; {args.duration}s per rate; mix {args.mix}")
     print(f"{'target/s':>9} {'accepted/s':>11} {'p50 ms':>7} {'p99 ms':>7} {'non-2xx':>8} "
-          f"{'fwd env/s':>10} {'CPU cores':>9} {'RSS MB':>7}  outcomes")
+          f"{'fwd env/s':>10} {'CPU cores':>9} {'idle':>5} {'RSS MB':>7}  outcomes")
     results = []
     for rate in [int(r) for r in args.rates.split(",")]:
         r = run(rate, args)
@@ -151,7 +160,8 @@ def main():
         bad = sum(n for s, n in rep["statuses"].items() if not s.startswith("2")) + rep["connection_errors"]
         print(f"{rate or 'max':>9} {rep['accepted_per_sec']:>11.0f} {rep['latency_ms']['p50']:>7} "
               f"{rep['latency_ms']['p99']:>7} {bad:>8} {r['forwarded_envelopes'] / rep['seconds']:>10.0f} "
-              f"{r['relay_cpu_cores']:>9.2f} {r['relay_rss_mb']:>7.0f}  {r['outcomes'] or '-'}")
+              f"{r['relay_cpu_cores']:>9.2f} {r['relay_idle_cores']:>5.2f} {r['relay_rss_mb']:>7.0f}  "
+              f"{r['outcomes'] or '-'}")
     if args.json:
         print(json.dumps(results, indent=2))
 

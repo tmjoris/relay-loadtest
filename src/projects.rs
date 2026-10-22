@@ -66,6 +66,8 @@ pub fn project_config(project: &Project) -> Value {
                 "enhancements": "eJybzDhxY05qemJypZWRgaGlroGxrqHRBABbEwcC",
             },
             "blacklistedIps": ["127.43.33.22"],
+            // Logs are only accepted for organizations with the feature.
+            "features": ["organizations:ourlogs-ingestion"],
         },
     })
 }
