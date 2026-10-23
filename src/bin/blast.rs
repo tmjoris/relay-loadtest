@@ -44,10 +44,14 @@ struct Args {
         default_value = "errors=30,transactions=30,sessions=25,check_ins=5,logs=10"
     )]
     mix: String,
+    /// Distinct user agents in the pool, Zipf-distributed.
+    #[arg(long, default_value_t = 4)]
+    user_agents: usize,
 }
 
 fn parse_mix(s: &str) -> anyhow::Result<Mix> {
     let mut mix = Mix {
+        user_agents: 4,
         errors: 0,
         transactions: 0,
         sessions: 0,
@@ -82,7 +86,10 @@ struct Tally {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
-    let mix = parse_mix(&args.mix)?;
+    let mix = Mix {
+        user_agents: args.user_agents,
+        ..parse_mix(&args.mix)?
+    };
     let built = Instant::now();
     let projects = projects::projects(args.projects);
     let pool: Arc<Vec<Prepared>> = Arc::new(envelopes::pool(

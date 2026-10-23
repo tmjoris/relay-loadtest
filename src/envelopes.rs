@@ -23,6 +23,9 @@ use crate::projects::Project;
 /// Relative weights of each envelope kind.
 #[derive(Clone, Copy, Debug)]
 pub struct Mix {
+    /// Distinct user agents, picked with a Zipf distribution so a few are
+    /// common and most are rare. 4 uses only the base browser strings.
+    pub user_agents: usize,
     pub errors: u32,
     pub transactions: u32,
     pub sessions: u32,
@@ -33,6 +36,7 @@ pub struct Mix {
 impl Default for Mix {
     fn default() -> Self {
         Mix {
+            user_agents: 4,
             errors: 30,
             transactions: 30,
             sessions: 25,
@@ -61,6 +65,8 @@ pub fn pool(
     let mut g = Gen {
         rng: StdRng::seed_from_u64(seed),
         now: now.timestamp_millis() as f64 / 1000.0,
+        user_agents: user_agents(mix.user_agents.max(1)),
+        ua_zipf: Zipf::new(mix.user_agents.max(1) as f64, 1.0).expect("valid zipf"),
     };
     let zipf = Zipf::new(projects.len() as f64, 1.1).expect("valid zipf");
     let kinds = [
@@ -173,6 +179,29 @@ const QUERIES: &[&str] = &[
 struct Gen {
     rng: StdRng,
     now: f64,
+    user_agents: Vec<String>,
+    ua_zipf: Zipf<f64>,
+}
+
+/// `n` distinct user agents: the base browser strings, then the same
+/// browsers with different build numbers, as a long tail of real traffic
+/// looks.
+fn user_agents(n: usize) -> Vec<String> {
+    (0..n)
+        .map(|i| {
+            let base = USER_AGENTS[i % USER_AGENTS.len()];
+            match i / USER_AGENTS.len() {
+                0 => base.to_owned(),
+                // An extra version component, so a variant never equals a
+                // base string.
+                build => base
+                    .replacen("Chrome/130.0.0.0", &format!("Chrome/130.0.{build}.1"), 1)
+                    .replacen("Firefox/131.0", &format!("Firefox/131.0.{build}"), 1)
+                    .replacen("Version/17.5", &format!("Version/17.5.{build}"), 1)
+                    .replacen("Mobile/15E148", &format!("Mobile/15E148.{build}"), 1),
+            }
+        })
+        .collect()
 }
 
 impl Gen {
@@ -187,6 +216,11 @@ impl Gen {
         uuid::Builder::from_random_bytes(self.rng.random())
             .into_uuid()
             .to_string()
+    }
+
+    fn user_agent(&mut self) -> String {
+        let i = self.ua_zipf.sample(&mut self.rng) as usize - 1;
+        self.user_agents[i].clone()
     }
 
     fn pick<'a>(&mut self, items: &'a [&'a str]) -> &'a str {
@@ -219,7 +253,7 @@ impl Gen {
             "method": "GET",
             "query_string": "page=2&api_key=sk_live_51HxT9e&sort=desc",
             "headers": {
-                "User-Agent": self.pick(USER_AGENTS),
+                "User-Agent": self.user_agent(),
                 "Cookie": "sessionid=a91f0c22; csrftoken=6b1e33e0",
                 "Authorization": "Bearer eyJhbGciOiJIUzI1NiJ9.e30.ZRrHA1JJJW8opsbCGfG_HACGpVUMN_a9IV7pAx_Zmeo",
                 "Accept-Language": "en-US,en;q=0.9",
@@ -454,6 +488,14 @@ impl Gen {
 mod tests {
     use super::*;
     use crate::projects::projects;
+
+    #[test]
+    fn user_agent_variants_are_distinct() {
+        let uas = user_agents(20_000);
+        let unique: std::collections::BTreeSet<_> = uas.iter().collect();
+        assert_eq!(unique.len(), 20_000);
+        assert_eq!(uas[..USER_AGENTS.len()], USER_AGENTS[..]);
+    }
 
     #[test]
     fn pool_is_deterministic_and_parseable() {

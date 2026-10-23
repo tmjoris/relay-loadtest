@@ -12,7 +12,7 @@ reports: envelopes Relay accepted per second, its response latency, what
 reached the upstream, the outcomes Relay reported (filtered, invalid, ...),
 Relay's CPU and its peak memory. Linux only: it reads /proc.
 """
-import argparse, json, os, shutil, subprocess, tempfile, threading, time, urllib.request
+import argparse, json, os, shutil, signal, subprocess, tempfile, threading, time, urllib.request
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BIN = os.path.join(ROOT, "target", "release")
@@ -50,16 +50,20 @@ def rss_mb(pid):
 
 
 def relay_config(dir, args):
+    config = {
+        "relay": {"mode": "managed", "upstream": f"http://{UPSTREAM}/",
+                  "host": RELAY.split(":")[0], "port": int(RELAY.split(":")[1])},
+        "logging": {"level": "warn"},
+        "limits": {"max_concurrent_requests": 1000},
+        # Post outcomes to the upstream instead of folding them into
+        # periodic client reports, so drops show up within the run.
+        "outcomes": {"emit_outcomes": True},
+    }
+    if args.statsd:
+        # Relay's own internal metrics (timers, counters) over StatsD.
+        config["metrics"] = {"statsd": args.statsd}
     with open(os.path.join(dir, "config.yml"), "w") as f:
-        json.dump({  # YAML is a superset of JSON
-            "relay": {"mode": "managed", "upstream": f"http://{UPSTREAM}/",
-                      "host": RELAY.split(":")[0], "port": int(RELAY.split(":")[1])},
-            "logging": {"level": "warn"},
-            "limits": {"max_concurrent_requests": 1000},
-            # Post outcomes to the upstream instead of folding them into
-            # periodic client reports, so drops show up within the run.
-            "outcomes": {"emit_outcomes": True},
-        }, f)
+        json.dump(config, f)  # YAML is a superset of JSON
     subprocess.run([args.relay_bin, "-c", dir, "credentials", "generate"],
                    check=True, capture_output=True)
 
@@ -68,7 +72,8 @@ def blast(rate, duration, args):
     out = subprocess.run(
         [os.path.join(BIN, "blast"), "--relay", f"http://{RELAY}", "--rate", str(rate),
          "--duration", str(duration), "--concurrency", str(args.concurrency),
-         "--projects", str(args.projects), "--mix", args.mix],
+         "--projects", str(args.projects), "--mix", args.mix,
+         "--user-agents", str(args.user_agents)],
         check=True, capture_output=True, text=True)
     return json.loads(out.stdout)
 
@@ -104,7 +109,19 @@ def run(rate, args):
                 time.sleep(0.2)
 
         threading.Thread(target=sample, daemon=True).start()
+        perf = None
+        if args.perf:
+            # DWARF unwinding: Rust release builds have no frame pointers,
+            # and Relay's release profile keeps full debug info.
+            perf = subprocess.Popen(
+                ["perf", "record", "-F", str(args.perf_freq), "--call-graph", args.call_graph,
+                 "-p", str(relay.pid), "-o", args.perf],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            time.sleep(1)
         report = blast(rate, args.duration, args)
+        if perf:
+            perf.send_signal(signal.SIGINT)
+            perf.wait()
         cpu_busy = cpu_seconds(relay.pid) - cpu0
         busy_secs = time.time() - t0
         time.sleep(args.drain)  # let Relay finish forwarding and report outcomes
@@ -143,8 +160,15 @@ def main():
     p.add_argument("--concurrency", type=int, default=64)
     p.add_argument("--projects", type=int, default=100)
     p.add_argument("--mix", default="errors=30,transactions=30,sessions=25,check_ins=5,logs=10")
+    p.add_argument("--user-agents", type=int, default=4,
+                   help="distinct user agents in the traffic, Zipf-distributed")
     p.add_argument("--relay-cpus", default="", help="pin Relay to these CPUs with taskset")
     p.add_argument("--json", action="store_true", help="print full results as JSON")
+    p.add_argument("--statsd", default="", help="send Relay's internal metrics here, e.g. 127.0.0.1:8125")
+    p.add_argument("--perf", default="", help="record Relay with perf into this file during the run")
+    p.add_argument("--perf-freq", type=int, default=499)
+    p.add_argument("--call-graph", default="dwarf,16384",
+                   help="perf call-graph mode: dwarf,SIZE, lbr (Intel), or fp with a frame-pointer build")
     p.add_argument("--keep", action="store_true", help="keep Relay's config dir and log")
     args = p.parse_args()
 
