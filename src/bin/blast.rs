@@ -47,11 +47,15 @@ struct Args {
     /// Distinct user agents in the pool, Zipf-distributed.
     #[arg(long, default_value_t = 4)]
     user_agents: usize,
+    /// Give every envelope a user agent no other envelope uses.
+    #[arg(long)]
+    unique_user_agents: bool,
 }
 
 fn parse_mix(s: &str) -> anyhow::Result<Mix> {
     let mut mix = Mix {
         user_agents: 4,
+        unique_user_agents: false,
         errors: 0,
         transactions: 0,
         sessions: 0,
@@ -88,6 +92,7 @@ async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     let mix = Mix {
         user_agents: args.user_agents,
+        unique_user_agents: args.unique_user_agents,
         ..parse_mix(&args.mix)?
     };
     let built = Instant::now();

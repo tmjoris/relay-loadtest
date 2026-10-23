@@ -26,6 +26,9 @@ pub struct Mix {
     /// Distinct user agents, picked with a Zipf distribution so a few are
     /// common and most are rare. 4 uses only the base browser strings.
     pub user_agents: usize,
+    /// Give every envelope a user agent no other envelope in the pool uses:
+    /// the worst case for anything that caches parsed user agents.
+    pub unique_user_agents: bool,
     pub errors: u32,
     pub transactions: u32,
     pub sessions: u32,
@@ -37,6 +40,7 @@ impl Default for Mix {
     fn default() -> Self {
         Mix {
             user_agents: 4,
+            unique_user_agents: false,
             errors: 30,
             transactions: 30,
             sessions: 25,
@@ -65,8 +69,14 @@ pub fn pool(
     let mut g = Gen {
         rng: StdRng::seed_from_u64(seed),
         now: now.timestamp_millis() as f64 / 1000.0,
-        user_agents: user_agents(mix.user_agents.max(1)),
+        user_agents: user_agents(if mix.unique_user_agents {
+            n.max(1)
+        } else {
+            mix.user_agents.max(1)
+        }),
         ua_zipf: Zipf::new(mix.user_agents.max(1) as f64, 1.0).expect("valid zipf"),
+        unique_user_agents: mix.unique_user_agents,
+        next_user_agent: 0,
     };
     let zipf = Zipf::new(projects.len() as f64, 1.1).expect("valid zipf");
     let kinds = [
@@ -181,6 +191,8 @@ struct Gen {
     now: f64,
     user_agents: Vec<String>,
     ua_zipf: Zipf<f64>,
+    unique_user_agents: bool,
+    next_user_agent: usize,
 }
 
 /// `n` distinct user agents: the base browser strings, then the same
@@ -219,7 +231,12 @@ impl Gen {
     }
 
     fn user_agent(&mut self) -> String {
-        let i = self.ua_zipf.sample(&mut self.rng) as usize - 1;
+        let i = if self.unique_user_agents {
+            self.next_user_agent += 1;
+            (self.next_user_agent - 1) % self.user_agents.len()
+        } else {
+            self.ua_zipf.sample(&mut self.rng) as usize - 1
+        };
         self.user_agents[i].clone()
     }
 
@@ -488,6 +505,32 @@ impl Gen {
 mod tests {
     use super::*;
     use crate::projects::projects;
+
+    #[test]
+    fn unique_mode_never_repeats_a_user_agent() {
+        let p = projects(10);
+        let now = DateTime::from_timestamp(1_792_000_000, 0).unwrap();
+        let mix = Mix {
+            unique_user_agents: true,
+            errors: 1,
+            transactions: 1,
+            sessions: 0,
+            check_ins: 0,
+            logs: 0,
+            ..Mix::default()
+        };
+        let pool = pool(&p, mix, 2000, 7, now);
+        let uas: Vec<String> = pool
+            .iter()
+            .map(|e| {
+                let text = String::from_utf8_lossy(&e.body);
+                let at = text.find("\"User-Agent\":\"").unwrap() + 14;
+                text[at..at + text[at..].find('"').unwrap()].to_owned()
+            })
+            .collect();
+        let unique: std::collections::BTreeSet<_> = uas.iter().collect();
+        assert_eq!(unique.len(), uas.len());
+    }
 
     #[test]
     fn user_agent_variants_are_distinct() {

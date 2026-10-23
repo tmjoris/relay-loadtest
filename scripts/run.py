@@ -68,14 +68,25 @@ def relay_config(dir, args):
                    check=True, capture_output=True)
 
 
-def blast(rate, duration, args):
-    out = subprocess.run(
-        [os.path.join(BIN, "blast"), "--relay", f"http://{RELAY}", "--rate", str(rate),
-         "--duration", str(duration), "--concurrency", str(args.concurrency),
-         "--projects", str(args.projects), "--mix", args.mix,
-         "--user-agents", str(args.user_agents), "--pool", str(args.pool)],
-        check=True, capture_output=True, text=True)
-    return json.loads(out.stdout)
+def blast(rate, duration, args, on_start=None):
+    """Runs the blaster; `on_start` is called once its envelope pool is built
+    and it starts sending, so measurements skip the build."""
+    cmd = [os.path.join(BIN, "blast"), "--relay", f"http://{RELAY}", "--rate", str(rate),
+           "--duration", str(duration), "--concurrency", str(args.concurrency),
+           "--projects", str(args.projects), "--mix", args.mix,
+           "--user-agents", str(args.user_agents), "--pool", str(args.pool)]
+    if args.unique_user_agents:
+        cmd.append("--unique-user-agents")
+    p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    for line in p.stderr:
+        if line.startswith("built "):
+            if on_start:
+                on_start()
+            break
+    out, err = p.communicate()
+    if p.returncode != 0:
+        raise SystemExit(f"blast failed: {err}")
+    return json.loads(out)
 
 
 def run(rate, args):
@@ -99,7 +110,12 @@ def run(rate, args):
         time.sleep(args.idle)
         idle_cores = (cpu_seconds(relay.pid) - idle0) / args.idle
 
-        up0, cpu0, t0 = get(f"http://{UPSTREAM}/stats"), cpu_seconds(relay.pid), time.time()
+        up0 = get(f"http://{UPSTREAM}/stats")
+        mark = {}
+
+        def started():
+            mark["cpu"], mark["t"] = cpu_seconds(relay.pid), time.time()
+
         peak = [0.0]
         done = threading.Event()
 
@@ -118,12 +134,12 @@ def run(rate, args):
                  "-p", str(relay.pid), "-o", args.perf],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             time.sleep(1)
-        report = blast(rate, args.duration, args)
+        report = blast(rate, args.duration, args, on_start=started)
         if perf:
             perf.send_signal(signal.SIGINT)
             perf.wait()
-        cpu_busy = cpu_seconds(relay.pid) - cpu0
-        busy_secs = time.time() - t0
+        cpu_busy = cpu_seconds(relay.pid) - mark["cpu"]
+        busy_secs = time.time() - mark["t"]
         time.sleep(args.drain)  # let Relay finish forwarding and report outcomes
         done.set()
         up1 = get(f"http://{UPSTREAM}/stats")
@@ -161,6 +177,8 @@ def main():
     p.add_argument("--projects", type=int, default=100)
     p.add_argument("--mix", default="errors=30,transactions=30,sessions=25,check_ins=5,logs=10")
     p.add_argument("--pool", type=int, default=5000, help="distinct envelopes to replay")
+    p.add_argument("--unique-user-agents", action="store_true",
+                   help="give every envelope a user agent no other envelope uses")
     p.add_argument("--user-agents", type=int, default=4,
                    help="distinct user agents in the traffic, Zipf-distributed")
     p.add_argument("--relay-cpus", default="", help="pin Relay to these CPUs with taskset")
