@@ -73,7 +73,7 @@ def blast(rate, duration, args):
         [os.path.join(BIN, "blast"), "--relay", f"http://{RELAY}", "--rate", str(rate),
          "--duration", str(duration), "--concurrency", str(args.concurrency),
          "--projects", str(args.projects), "--mix", args.mix,
-         "--user-agents", str(args.user_agents)],
+         "--user-agents", str(args.user_agents), "--pool", str(args.pool)],
         check=True, capture_output=True, text=True)
     return json.loads(out.stdout)
 
@@ -160,6 +160,7 @@ def main():
     p.add_argument("--concurrency", type=int, default=64)
     p.add_argument("--projects", type=int, default=100)
     p.add_argument("--mix", default="errors=30,transactions=30,sessions=25,check_ins=5,logs=10")
+    p.add_argument("--pool", type=int, default=5000, help="distinct envelopes to replay")
     p.add_argument("--user-agents", type=int, default=4,
                    help="distinct user agents in the traffic, Zipf-distributed")
     p.add_argument("--relay-cpus", default="", help="pin Relay to these CPUs with taskset")
